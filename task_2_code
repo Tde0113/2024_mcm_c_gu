@@ -1,0 +1,123 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.metrics import accuracy_score, log_loss, classification_report
+from sklearn.model_selection import train_test_split
+from scipy import stats
+REAL_FILE_PATH = "Wimbledon_featured_matches.csv"
+plt.style.use('seaborn-v0_8-whitegrid')
+plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial']
+plt.rcParams['axes.unicode_minus'] = False
+def read_wimbledon_data(file_path: str) -> pd.DataFrame:
+    try:
+        df = pd.read_csv(file_path, encoding='utf-8')
+    except UnicodeDecodeError:
+        df = pd.read_csv(file_path, encoding='latin-1')
+    return df
+def feature_engineering(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df['Label'] = df['point_victor'].apply(lambda x: 1 if x == 1 else 0)
+    mean_speed = df['speed_mph'].mean()
+    df['speed_mph_filled'] = df['speed_mph'].fillna(mean_speed)
+    df['Phi'] = (df['speed_mph_filled'] - df['speed_mph_filled'].mean()) / df['speed_mph_filled'].std()
+    df['Omega'] = df[['p1_break_pt', 'p2_break_pt']].max(axis=1)
+    df['Serve_Ind'] = df['server'].apply(lambda x: 1 if x == 1 else 0)
+    psi_list = []
+    for match_id, group in df.groupby('match_id'):
+        group = group.sort_values('point_no')
+        current_mom = 0
+        match_psi = []
+        for label in group['Label']:
+            impact = 1 if label == 1 else -1
+            current_mom = 0.2 * impact + 0.8 * current_mom
+            match_psi.append(current_mom)
+        psi_series = pd.Series(match_psi, index=group.index)
+        psi_list.append(psi_series)
+    df['Psi'] = pd.concat(psi_list).sort_index()
+    return df
+def train_and_evaluate(df: pd.DataFrame):
+    features = ['Phi', 'Omega', 'Psi', 'Serve_Ind']
+    X = df[features]
+    y = df['Label']
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train_coach = X_train.copy()
+    X_train_coach['Psi'] = 0
+    X_test_coach = X_test.copy()
+    X_test_coach['Psi'] = 0
+    X_train_full = X_train.copy()
+    X_test_full = X_test.copy()
+    params = {'n_estimators': 100, 'learning_rate': 0.1, 'max_depth': 3, 'random_state': 42}
+    model_coach = GradientBoostingClassifier(**params)
+    model_coach.fit(X_train_coach, y_train)
+    model_full = GradientBoostingClassifier(**params)
+    model_full.fit(X_train_full, y_train)
+    pred_coach = model_coach.predict(X_test_coach)
+    prob_coach = model_coach.predict_proba(X_test_coach)[:, 1]
+    pred_full = model_full.predict(X_test_full)
+    prob_full = model_full.predict_proba(X_test_full)[:, 1]
+    metrics = {
+        'acc_coach': accuracy_score(y_test, pred_coach),
+        'acc_full': accuracy_score(y_test, pred_full),
+        'loss_coach': log_loss(y_test, prob_coach),
+        'loss_full': log_loss(y_test, prob_full),
+        'feat_imp': model_full.feature_importances_
+    }
+    return metrics, model_coach, model_full
+def visualize_results(metrics, df, model_coach, model_full):
+    fig = plt.figure(figsize=(16, 12))
+    ax1 = plt.subplot(2, 2, 1)
+    labels = ['Coach Model\n(No Momentum)', 'ECPPM Model\n(Full)']
+    values = [metrics['acc_coach'], metrics['acc_full']]
+    colors = ['#FFCC80', '#66BB6A']
+    bars = ax1.bar(labels, values, color=colors)
+    ax1.set_title('Prediction Accuracy Comparison', fontsize=14, fontweight='bold')
+    ax1.set_ylim(0, 1.0)
+    for bar in bars:
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width() / 2., height, f'{height:.1%}',
+                 ha='center', va='bottom', fontsize=12, fontweight='bold')
+    ax2 = plt.subplot(2, 2, 2)
+    feature_names = ['Phi (Speed)', 'Omega (Risk)', 'Psi (Momentum)', 'Serve_Ind']
+    importances = metrics['feat_imp']
+    idx = np.argsort(importances)
+    ax2.barh(np.array(feature_names)[idx], importances[idx], color='teal')
+    ax2.set_title('Feature Importance (ECPPM)', fontsize=14, fontweight='bold')
+    ax3 = plt.subplot(2, 2, 3)
+    l_values = [metrics['loss_coach'], metrics['loss_full']]
+    l_colors = ['#FFAB91', '#4DB6AC']
+    bars3 = ax3.bar(labels, l_values, color=l_colors)
+    ax3.set_title('Log-Loss Error (Lower is Better)', fontsize=14, fontweight='bold')
+    for bar in bars3:
+        height = bar.get_height()
+        ax3.text(bar.get_x() + bar.get_width() / 2., height, f'{height:.4f}',
+                 ha='center', va='bottom', fontsize=12, fontweight='bold')
+    ax4 = plt.subplot(2, 2, 4)
+    target_id = '2023-wimbledon-1701'
+    if target_id not in df['match_id'].values:
+        target_id = df['match_id'].unique()[0]
+    match_df = df[df['match_id'] == target_id].copy().sort_values('point_no')
+    X_vis = match_df[['Phi', 'Omega', 'Psi', 'Serve_Ind']]
+    y_vis = match_df['Label']
+    prob_full = model_full.predict_proba(X_vis)[:, 1]
+    prob_coach = model_coach.predict_proba(X_vis.assign(Psi=0))[:, 1]
+    limit = min(100, len(y_vis))
+    steps = range(limit)
+    ax4.plot(steps, prob_coach[:limit], label='Coach Model', color='orange', linestyle='--', alpha=0.8)
+    ax4.plot(steps, prob_full[:limit], label='ECPPM Model', color='green', linewidth=2)
+    ax4.scatter(steps, y_vis.iloc[:limit], color='gray', s=10, alpha=0.5, label='Actual Result')
+    ax4.set_title(f'Real-time Win Probability (Match: {target_id})', fontsize=14, fontweight='bold')
+    ax4.set_xlabel('Points')
+    ax4.set_ylabel('P(Player 1 Win)')
+    ax4.legend(loc='lower right')
+    plt.tight_layout()
+    plt.savefig(dpi=300)
+    plt.show()
+
+if __name__ == "__main__":
+    try:
+        df_raw = read_wimbledon_data(REAL_FILE_PATH)
+        df_processed = feature_engineering(df_raw)
+        metrics, model_c, model_f = train_and_evaluate(df_processed)
+        visualize_results(metrics, df_processed, model_c, model_f)
