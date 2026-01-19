@@ -1,0 +1,54 @@
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
+file_path = 'Wimbledon_featured_matches.csv'
+def load_data(filepath):
+    try:
+        df = pd.read_csv(filepath)
+    df['speed_mph'] = df['speed_mph'].fillna(df['speed_mph'].mean())
+    df['p1_distance_run'] = df['p1_distance_run'].fillna(0)
+    df['p2_distance_run'] = df['p2_distance_run'].fillna(0)
+    df['point_victor'] = df['point_victor'].astype(int)
+    return df
+def aggregate_to_game_level(df):
+    df['game_unique_id'] = df['match_id'] + "_" + df['set_no'].astype(str) + "_" + df['game_no'].astype(str)
+    game_outcomes = df.groupby('game_unique_id').last().reset_index()
+    point_counts = df.groupby(['game_unique_id', 'point_victor']).size().unstack(fill_value=0)
+    agg_funcs = {
+        'match_id': 'first',
+        'set_no': 'first',
+        'game_no': 'first',
+        'server': 'first',
+        'p1_distance_run': 'sum',
+        'p2_distance_run': 'sum',
+        'speed_mph': 'mean',
+        'rally_count': 'mean',
+        'point_victor': lambda x: x.iloc[-1]
+    }
+    games_df = df.groupby('game_unique_id').agg(agg_funcs)
+    games_df['game_winner'] = games_df['point_victor']
+    games_df['is_p1_serve'] = (games_df['server'] == 1).astype(int)
+    games_df['p1_cum_dist'] = games_df.groupby('match_id')['p1_distance_run'].cumsum()
+    games_df['p2_cum_dist'] = games_df.groupby('match_id')['p2_distance_run'].cumsum()
+    games_df['fatigue_diff'] = (games_df['p1_cum_dist'] - games_df['p2_cum_dist']) / 1000.0
+    games_df['prev_winner'] = games_df.groupby('match_id')['game_winner'].shift(1).fillna(0)
+    games_df['momentum_p1'] = (games_df['prev_winner'] == 1).astype(int)
+    games_df['is_critical'] = ((games_df['set_no'] == 5) | (games_df['game_no'] > 10)).astype(int)
+    return games_df
+raw_df = load_data(file_path)
+game_data = aggregate_to_game_level(raw_df)
+features = ['is_p1_serve', 'fatigue_diff', 'momentum_p1', 'is_critical', 'speed_mph']
+X = game_data[features].fillna(0)
+y = (game_data['game_winner'] == 1).astype(int)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+model = GradientBoostingClassifier(
+    n_estimators=200,
+    learning_rate=0.05,
+    max_depth=3,
+    random_state=42
+)
+model.fit(X_train, y_train)
+y_pred = model.predict(X_test)
+acc = accuracy_score(y_test, y_pred)
