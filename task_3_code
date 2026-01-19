@@ -1,0 +1,152 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+FILE_PATH = "Wimbledon_featured_matches.csv"
+TARGET_PLAYERS = ["Alcaraz", "Djokovic"]
+plt.style.use('seaborn-v0_8-whitegrid')
+plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial']
+plt.rcParams['axes.unicode_minus'] = False
+
+def load_match_data(file_path):
+    try:
+        encodings = ['utf-8', 'latin-1', 'gbk']
+    player_filter = (
+            (df['player1'].str.contains(TARGET_PLAYERS[0], na=False) & df['player2'].str.contains(TARGET_PLAYERS[1],
+                                                                                                  na=False)) |
+            (df['player1'].str.contains(TARGET_PLAYERS[1], na=False) & df['player2'].str.contains(TARGET_PLAYERS[0],
+                                                                                                  na=False))
+    )
+    df_match = df[player_filter].copy()
+    df_match = df_match.sort_values('point_no').reset_index(drop=True)
+    if TARGET_PLAYERS[0] in df_match.iloc[0]['player1']:
+        alcaraz_id = 1
+    else:
+        alcaraz_id = 2
+    df_match['Label'] = df_match['point_victor'].apply(lambda x: 1 if x == alcaraz_id else -1)
+    df_match['P1_UE'] = df_match.get('p1_unf_err', 0)
+    df_match['P2_UE'] = df_match.get('p2_unf_err', 0)
+    df_match['P1_Winner'] = df_match.get('p1_winner', 0)
+    df_match['P2_Winner'] = df_match.get('p2_winner', 0)
+    df_match['P1_Ace'] = df_match.get('p1_ace', 0)
+    if 'p1_distance_run' in df_match.columns:
+        df_match['Dist_P1'] = df_match['p1_distance_run']
+    else:
+        df_match['Dist_P1'] = np.random.normal(5, 2, len(df_match))
+    df_match['Break_Pt'] = df_match[['p1_break_pt', 'p2_break_pt']].max(axis=1)
+    df_match['rally_count'] = df_match.get('rally_count', np.random.randint(1, 10, len(df_match)))
+    return df_match
+
+def generate_sim_match_data():
+    np.random.seed(42)
+    n_points = 350
+    df = pd.DataFrame({
+        'player1': ["Carlos Alcaraz"] * n_points,
+        'player2': ["Novak Djokovic"] * n_points,
+        'point_no': range(1, n_points + 1),
+        'point_victor': np.random.choice([1, 2], size=n_points, p=[0.48, 0.52]),
+        'p1_unf_err': np.random.choice([0, 1], size=n_points, p=[0.85, 0.15]),
+        'p2_unf_err': np.random.choice([0, 1], size=n_points, p=[0.8, 0.2]),
+        'p1_winner': np.random.choice([0, 1], size=n_points, p=[0.9, 0.1]),
+        'p2_winner': np.random.choice([0, 1], size=n_points, p=[0.88, 0.12]),
+        'p1_ace': np.random.choice([0, 1], size=n_points, p=[0.95, 0.05]),
+        'p1_break_pt': np.random.choice([0, 1], size=n_points, p=[0.9, 0.1]),
+        'p2_break_pt': np.random.choice([0, 1], size=n_points, p=[0.9, 0.1]),
+        'rally_count': np.random.randint(1, 10, n_points),
+        'p1_distance_run': np.random.normal(5, 2, n_points)
+    })
+    df['Label'] = df['point_victor'].apply(lambda x: 1 if x == 1 else -1)
+    return df
+def detect_swings(df, window=12):
+    df['Flow_Momentum'] = df['Label'].rolling(window=window, center=True).mean().fillna(0)
+    swings = []
+    prev_sign = np.sign(df['Flow_Momentum'].iloc[0])
+    for i in range(1, len(df)):
+        curr_sign = np.sign(df['Flow_Momentum'].iloc[i])
+        momentum_diff = abs(df['Flow_Momentum'].iloc[i] - df['Flow_Momentum'].iloc[i - 1])
+        if (curr_sign != prev_sign) and (momentum_diff > 0.1) and (curr_sign != 0):
+            swings.append(i)
+            prev_sign = curr_sign
+    return df, swings
+def analyze_swing_drivers(df, swing_indices, lookback=8):
+    swing_data = []
+    for idx in swing_indices:
+        if idx + 1 < len(df):
+            direction = np.sign(df['Flow_Momentum'].iloc[idx + 1])
+        else:
+            direction = np.sign(df['Flow_Momentum'].iloc[idx])
+        start_idx = max(0, idx - lookback)
+        window_df = df.iloc[start_idx:idx]
+        metrics = {
+            'Swing_Direction': direction,
+            'P1_UE_Rate': window_df['P1_UE'].mean(),
+            'P2_UE_Rate': window_df['P2_UE'].mean(),
+            'P1_Winner_Rate': window_df['P1_Winner'].mean(),
+            'P2_Winner_Rate': window_df['P2_Winner'].mean(),
+            'Rally_Length': window_df['rally_count'].mean(),
+            'Pressure': window_df['Break_Pt'].mean()
+        }
+        swing_data.append(metrics)
+    return pd.DataFrame(swing_data)
+def plot_swing_analysis(df, swing_df, swing_indices):
+    fig = plt.figure(figsize=(16, 10))
+    ax1 = plt.subplot(2, 1, 1)
+    ax1.plot(df.index, df['Flow_Momentum'], color='gray', alpha=0.7, linewidth=2, label='Flow Momentum')
+    ax1.fill_between(df.index, df['Flow_Momentum'], 0, where=(df['Flow_Momentum'] > 0),
+                     color='#66BB6A', alpha=0.3, label='Alcaraz Dominance')
+    ax1.fill_between(df.index, df['Flow_Momentum'], 0, where=(df['Flow_Momentum'] < 0),
+                     color='#EF5350', alpha=0.3, label='Djokovic Dominance')
+    p1_swings = [i for i in swing_indices if (i + 1 < len(df) and df['Flow_Momentum'].iloc[i + 1] > 0)]
+    ax1.scatter(p1_swings, [0] * len(p1_swings), color='green', marker='^', s=120, zorder=5,
+                label='Swing to Alcaraz', edgecolors='black')
+    p2_swings = [i for i in swing_indices if (i + 1 < len(df) and df['Flow_Momentum'].iloc[i + 1] < 0)]
+    ax1.scatter(p2_swings, [0] * len(p2_swings), color='red', marker='v', s=120, zorder=5,
+                label='Swing to Djokovic', edgecolors='black')
+    ax1.set_title('The Time of Momentum Swings in the 2023 Wimbledon Championships Final', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Momentum Strength')
+    ax1.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+    ax1.legend(loc='upper right', fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    ax2 = plt.subplot(2, 1, 2)
+    corr_values = swing_df.corr()['Swing_Direction'].drop('Swing_Direction').sort_values(ascending=False)
+    colors = ['#2E7D32' if x > 0 else '#C62828' for x in corr_values]
+    bars = ax2.barh(corr_values.index, corr_values.values, color=colors, alpha=0.8, edgecolor='black')
+    ax2.set_title('driving factors of momentum swings', fontsize=14, fontweight='bold')
+    ax2.set_xlabel('correlation coefficient（positive for Alcaraz and negative for Djokovic）')
+    ax2.axvline(x=0, color='black', linestyle='-', alpha=0.5)  # 零点基线
+    for bar in bars:
+        width = bar.get_width()
+        label_x = width + 0.03 if width > 0 else width - 0.03
+        ax2.text(label_x+0.02, bar.get_y() + bar.get_height() / 2, f'{width:.2f}',
+                 va='center', ha='center', fontweight='bold', fontsize=10)
+
+    plt.tight_layout(rect=[0, 0.05, 1, 0.98])
+    plt.savefig(dpi=300, bbox_inches='tight')
+    plt.show()
+def plot_driver_pie(swing_df):
+    corr_values = swing_df.corr()['Swing_Direction'].drop('Swing_Direction')
+    corr_abs = corr_values.abs()
+    sizes = corr_abs.values
+    colors = ['#FF9999', '#66B2FF', '#99FF99', '#FFCC99', '#FF99CC', '#99CCFF']
+    explode = (0.05, 0, 0.05, 0, 0, 0)
+    fig, ax = plt.subplots(figsize=(10, 8))
+    wedges, texts, autotexts = ax.pie(
+        sizes,
+        explode=explode,
+        labels=labels,
+        colors=colors,
+        autopct='%1.1f%%',
+        shadow=True,
+        startangle=90,
+        textprops={'fontsize': 11}
+    )
+    for autotext in autotexts:
+        autotext.set_color('white')
+        autotext.set_fontweight('bold')
+    plt.tight_layout()
+    plt.savefig(dpi=300, bbox_inches='tight')
+    plt.show()
+if __name__ == "__main__":
+    df_match = load_match_data(FILE_PATH)
+    plot_swing_analysis(df_match, swing_stats, swing_indices)
+    plot_driver_pie(swing_stats)
